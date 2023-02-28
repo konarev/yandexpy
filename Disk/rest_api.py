@@ -61,41 +61,6 @@ class Request:
         self.resp_count = 0
         self.response_body = self._get()
 
-    # def _get2(
-    #     self,
-    #     params: dict = None,
-    # ) -> dict[str, ...]:
-    #
-    #     if params is None:
-    #         params = self.params
-    #
-    #     if len(self._cache) > self.resp_count:
-    #         return self._cache[self.resp_count]
-    #
-    #     headers = {
-    #         "Accept": "*/*",
-    #         "Depth": "1",
-    #         "Authorization": f"OAuth {self.disk.token}",
-    #     }
-    #     url = "https://cloud-api.yandex.net" + self.href_api
-    #
-    #     params = {
-    #         key: str(value)
-    #         for key, value in params.items()
-    #         if value is not None and not key.startswith("_")
-    #     }
-    #     response = requests.request(
-    #         method=self.method, url=url, headers=headers, params=params
-    #     )
-    #     self.status_code = response.status_code
-    #     if response.status_code >= 400:
-    #         raise RequestError(ErrorInfo(response.json()))
-    #
-    #     response = response.json()
-    #
-    #     self._cache.append(response)
-    #
-    #     return response
 
     def _get(
             self,
@@ -153,16 +118,6 @@ class Request:
             params["offset"] = offset
 
 
-# def on_call_event(method):
-#     @functools.wraps(method)
-#     def wrap(self, *args, **kwargs):
-#         self.on_event_before(method.__name__, *args, **kwargs)
-#         result = method(self, *args, **kwargs)
-#         self.on_event_after(method.__name__, result, *args, **kwargs)
-#         return result
-#
-#     return wrap
-
 
 class ResourceIterator(typing.Generic[T]):
     def __init__(self, request=None):
@@ -200,8 +155,8 @@ def request_map(cls=None, /, *, keys_rename: dict[str, str] = None):
 
     def __init__(self, request: "Request", from_dict: dict = None):
         nonlocal keys_rename
-        if from_dict is None:
-            from_dict = request.response_body
+        #if from_dict is None:
+        from_dict = from_dict or request.response_body
         for key_dict, value in from_dict.items():
             attr_name = key_dict
             if key_dict in keys_rename:
@@ -244,8 +199,7 @@ def request_map(cls=None, /, *, keys_rename: dict[str, str] = None):
     if cls is None:
         return partial(request_map, keys_rename=keys_rename)
 
-    if keys_rename is None:
-        keys_rename = {}
+    keys_rename = keys_rename or {}
 
     cls.__request_map__ = {}
     cls.__init__ = __init__
@@ -509,8 +463,8 @@ class Disk:
         }
         url = "https://cloud-api.yandex.net" + href_api
 
-        if params is None:
-            params = {}
+        #if params is None:
+        params = params or {}
         # params.update(kwargs)
         params = {
             key: str(value)
