@@ -10,13 +10,15 @@ _yandex_token = os.environ["YDISK_TOKEN"]
 
 disk = rest_api.Disk(_yandex_token)
 
-print(disk.info())
+#print(disk.info())
 
+#exit()
 
-# result = disk.resource_info("/Книги/Информационные технологии")
-# for item in result.embedded.items:
-#     print("\t", item, end="\n" * 2)
-#
+result = disk.resource_info("/Книги/Информационные технологии")
+for item in result.embedded.items:
+    #print("==========")
+    print("\t", item, end="\n" * 2)
+
 #
 # print("\n\n=== trash ====\n\n")
 #
@@ -31,6 +33,7 @@ print(disk.info())
 #     os.path.expanduser("~") + "/RegEx_регулярные_выражения_в_Python.pdf",
 # )
 
+exit()
 
 def show_progress(size: int):
     print(size)

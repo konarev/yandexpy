@@ -1,28 +1,19 @@
 import dataclasses
-import enum
-import functools
 import typing
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
-from typing import Any, TypeAlias, Iterable
+from typing import Any, Iterable, TypeAlias
 
 import dateutil.parser
 import requests
+
 from py_utils import utils
 from py_utils.utils import args_asdict
 
 _DEBUG_ = True
 
-FieldsList: TypeAlias = str
-ResultCode: TypeAlias = int
-Params: TypeAlias = dict[str, str]
-operation_id: TypeAlias = str
-
 href: TypeAlias = str
-disk_path: TypeAlias = str
-public_key_or_path: TypeAlias = str
-
 http_method: TypeAlias = typing.Literal["PUT", "GET", "POST", "PATCH", "DELETE"]
 
 T = typing.TypeVar("T")
@@ -49,7 +40,17 @@ class Request:
         self.disk = disk
         self.method = method
         self.href_api = href_api
+
+        if params is None:
+            params = {}
+
+        params = {
+            key: str(value)
+            for key, value in params.items()
+            if value and not key.startswith("_")
+        }
         self.params = params
+
         self.headers = {
             "Accept": "*/*",
             "Depth": "1",
@@ -60,7 +61,6 @@ class Request:
         self._cache = []
         self.resp_count = 0
         self.response_body = self._get()
-
 
     def _get(
             self,
@@ -73,9 +73,13 @@ class Request:
         if len(self._cache) > self.resp_count:
             return self._cache[self.resp_count]
 
-        response = self.disk.http_request(
-            method=self.method, href_api=self.href_api, params=params
+        response = requests.request(
+            method=self.method, url=self.url, headers=self.headers, params=params,
         )
+
+        if response.status_code >= 400:
+            raise RequestError(ErrorInfo(response.json()))
+
         self.status_code = response.status_code
 
         response = response.json()
@@ -90,7 +94,7 @@ class Request:
                 value = value["_embedded"]
             return value
 
-        self.resp_count = offset = item_count = 0
+        self.resp_count = offset = 0
         params = self.params.copy()
 
         while (
@@ -99,27 +103,13 @@ class Request:
                 and (items := root["items"])
                 and len(items) > 0
         ):
-            self.disk.on_event_before(
-                "get_embedded",
-                request_data=response,
-                params=params,
-            )
-            for item in items:
-                yield item
-                self.disk.on_event_after(
-                    "get_embedded",
-                    item_count,
-                    request_data=response,
-                    params=params,
-                )
-                item_count += 1
+            yield from items
             self.resp_count += 1
             offset += len(items)
             params["offset"] = offset
 
 
-
-class ResourceIterator(typing.Generic[T]):
+class EmbeddedResources(typing.Generic[T]):
     def __init__(self, request=None):
         self.request: "Request" = request
 
@@ -155,8 +145,8 @@ def request_map(cls=None, /, *, keys_rename: dict[str, str] = None):
 
     def __init__(self, request: "Request", from_dict: dict = None):
         nonlocal keys_rename
-        #if from_dict is None:
-        from_dict = from_dict or request.response_body
+        if from_dict is None:
+            from_dict = request.response_body
         for key_dict, value in from_dict.items():
             attr_name = key_dict
             if key_dict in keys_rename:
@@ -165,7 +155,7 @@ def request_map(cls=None, /, *, keys_rename: dict[str, str] = None):
             if attr_name in annotations:
                 ann_type = utils.get_origin_type(annotations[attr_name])
                 try:
-                    if "ResourceIterator" in repr(ann_type):
+                    if "EmbeddedResources" in repr(ann_type):
                         desc_value = ann_type(request)
                         desc_value.__set_name__(type(self), attr_name)
                         # TODO: Дескриптор заработал только через класс, возможные проблемы?
@@ -189,8 +179,7 @@ def request_map(cls=None, /, *, keys_rename: dict[str, str] = None):
                 + f", ".join(
             (
                 f"{key}:{repr(getattr(self, key))}"
-                for key in dir(self)
-                if not key.startswith("__")
+                for key in dir(self) if not key.startswith("__") and key != "items"
             )
         )
                 + ")"
@@ -199,7 +188,8 @@ def request_map(cls=None, /, *, keys_rename: dict[str, str] = None):
     if cls is None:
         return partial(request_map, keys_rename=keys_rename)
 
-    keys_rename = keys_rename or {}
+    if keys_rename is None:
+        keys_rename = {}
 
     cls.__request_map__ = {}
     cls.__init__ = __init__
@@ -312,7 +302,7 @@ class File(FileShort):
 class ResourceList:
     sort: str
     "(string, optional): <Поле, по которому отсортирован список>"
-    items: ResourceIterator[ResourceShort]
+    items: EmbeddedResources[ResourceShort]
     "Iterable[ResourceShort] <Элементы списка>"
     limit: int
     "(integer, optional): <Количество элементов на странице>"
@@ -339,13 +329,13 @@ class TrashResource(TrashResourceShort):
 
 @request_map
 class TrashResourceList(ResourceList):
-    items: ResourceIterator[TrashResourceShort]
+    items: EmbeddedResources[TrashResourceShort]
     "<Элементы списка>"
 
 
 @request_map
 class LastUploadedResourceList:
-    items: ResourceIterator[ResourceShort]
+    items: EmbeddedResources[ResourceShort]
     "(Array[Resource]): <Элементы списка>"
     limit: int
     "(integer, optional): <Количество элементов на странице"
@@ -353,7 +343,7 @@ class LastUploadedResourceList:
 
 @request_map
 class FilesResourceList:
-    items: ResourceIterator[FileShort]  # (Array[Resource]): <Элементы списка>,
+    items: EmbeddedResources[FileShort]  # (Array[Resource]): <Элементы списка>,
     limit: int  # (integer, optional): <Количество элементов на странице>,
     offset: int  # (integer, optional): <Смещение от начала списка>
 
@@ -381,7 +371,7 @@ class PublicResourceList(Resource):
     "(string, optional): <Поле, по которому отсортирован список>"
     public_key: str
     "(string): <Ключ опубликованного ресурса>"
-    items: ResourceIterator[ResourceShort]
+    items: EmbeddedResources[ResourceShort]
     "<Элементы списка>"
     limit: int
     "(integer, optional): <Количество элементов на странице>"
@@ -399,7 +389,7 @@ class PublicResourcesList(Resource):
     Список опубликованных ресурсов
     """
 
-    items: ResourceIterator[ResourceShort]  # (Array[Resource]): <Элементы списка>,
+    items: EmbeddedResources[ResourceShort]  # (Array[Resource]): <Элементы списка>,
     type: str  # (string, optional): <Значение фильтра по типу ресурсов>,
     limit: int  # (integer, optional): <Количество элементов на странице>,
     offset: int  # (integer, optional): <Смещение от начала списка>
@@ -427,10 +417,10 @@ class ErrorInfo:
     "Значение лимита."
 
 
-class HttpStatus(enum.Enum):
-    done = enum.auto()
-    inProgress = enum.auto()
-    error = enum.auto()
+# class HttpStatus(enum.Enum):
+#     done = enum.auto()
+#     inProgress = enum.auto()
+#     error = enum.auto()
 
 
 @request_map
@@ -439,53 +429,18 @@ class Link:
     method: str  # <HTTP-метод>
     templated: bool  # <Признак шаблонизированного URL>
     operation_id: str  # (string): Идентификатор асинхронной операции
-    status: HttpStatus = HttpStatus.done
+    # status: HttpStatus = HttpStatus.done
 
 
 @dataclass(unsafe_hash=True, frozen=True)
 class Disk:
     token: str = dataclasses.field(hash=True)
 
-    # def on_event_before(self, callfn_name: str, /, *args, **kwargs):
-    #     ...
-    #
-    # def on_event_after(self, callfn_name: str, result: Any, /, *args, **kwargs):
-    #     ...
-
-    def http_request(
-            self, method: str, href_api: str, params: dict = None, **kwargs
-    ) -> requests.Response:
-
-        headers = {
-            "Accept": "*/*",
-            "Depth": "1",
-            "Authorization": f"OAuth {self.token}",
-        }
-        url = "https://cloud-api.yandex.net" + href_api
-
-        #if params is None:
-        params = params or {}
-        # params.update(kwargs)
-        params = {
-            key: str(value)
-            for key, value in params.items()
-            if value is not None and not key.startswith("_")
-        }
-        response = requests.request(
-            method=method, url=url, headers=headers, params=params, **kwargs
-        )
-
-        if response.status_code >= 400:
-            raise RequestError(ErrorInfo(response.json()))
-
-        return response
-
-    # @on_call_event
     def resource_info(
             self,
             path: str | ResourceShort,
             *,
-            fields: FieldsList = None,
+            fields: str = None,
             limit: int = None,
             offset: int = None,
             preview_crop: bool = None,
@@ -518,7 +473,6 @@ class Disk:
         request = Request(self, "GET", "/v1/disk/resources", params=params)
         return Resource(request)
 
-    # @on_call_event
     def remove_resource(
             self,
             path: str | ResourceShort,
@@ -552,7 +506,6 @@ class Disk:
             return None
         return Link(request)
 
-    # @on_call_event
     def move_resource(
             self,
             path: str | ResourceShort,
@@ -585,7 +538,6 @@ class Disk:
         request = Request(self, "POST", "/v1/disk/resources/move", params)
         return Link(request)
 
-    # @on_call_event
     def copy_resource(
             self,
             path: str | ResourceShort,
@@ -619,7 +571,6 @@ class Disk:
         request = Request(self, "POST", "/v1/disk/resources", params)
         return Link(request)
 
-    # @on_call_event
     def update_resource(
             self, path: str | ResourceShort, body: Any, *, fields: str = None
     ) -> ResourceShort:
@@ -641,7 +592,6 @@ class Disk:
         request = Request(self, "PATCH", "/v1/disk/resources", params, body=body)
         return ResourceShort(request)
 
-    # @on_call_event
     def mkdir(self, path: str | ResourceShort, *, fields: str = None) -> Link:
         """
         Создает папку
@@ -660,7 +610,6 @@ class Disk:
         request = Request(self, "PUT", "/v1/disk/resources", params)
         return Link(request)
 
-    # @on_call_event
     def download_resource(
             self, path: str | ResourceShort, *, fields: str = None
     ) -> Link:
@@ -680,7 +629,6 @@ class Disk:
         request = Request(self, "GET", "/v1/disk/resources/download", params)
         return Link(request)
 
-    # @on_call_event
     def download_public_resource(
             self, public_key: str, *, path: str = None, fields: str = None
     ) -> Link:
@@ -699,11 +647,10 @@ class Disk:
         request = Request(self, "GET", "/v1/disk/public/resources/download", params)
         return Link(request)
 
-    # @on_call_event
     def files(
             self,
             *,
-            fields: FieldsList = None,
+            fields: str = None,
             media_type: str = None,
             limit: int = None,
             offset: int = None,
@@ -732,12 +679,11 @@ class Disk:
         request = Request(self, "GET", "/v1/disk/resources/files", params)
         return FilesResourceList(request)
 
-    # @on_call_event
     def last_uploaded(
             self,
             *,
             limit: int = None,
-            fields: FieldsList = None,
+            fields: str = None,
             media_type: str = None,
             preview_crop: bool = None,
             preview_size: str = None,
@@ -763,11 +709,10 @@ class Disk:
         request = Request(self, "GET", "/v1/disk/resources/last-uploaded", params)
         return LastUploadedResourceList(request)
 
-    # @on_call_event
     def public(
             self,
             *,
-            fields: FieldsList = None,
+            fields: str = None,
             limit: int = None,
             offset: int = None,
             preview_crop: bool = None,
@@ -795,7 +740,6 @@ class Disk:
         request = Request(self, "GET", "/v1/disk/resources/public", params)
         return PublicResourcesList(request)
 
-    # @on_call_event
     def publish(self, path: str | ResourceShort, *, fields: str = None) -> Link:
         """
         Опубликовать ресурс
@@ -814,7 +758,6 @@ class Disk:
         request = Request(self, "PUT", "/v1/disk/public/resources/publish", params)
         return Link(request)
 
-    # @on_call_event
     def unpublish(self, path: str | ResourceShort, *, fields: str = None) -> Link:
         """
         Отметить публикацию ресурса
@@ -834,7 +777,6 @@ class Disk:
         request = Request(self, "PUT", "/v1/disk/public/resources/unpublish", params)
         return Link(request)
 
-    # @on_call_event
     def upload_file(
             self, path: str | ResourceShort, *, fields: str = None, overwrite: bool = None
     ) -> ResourceUploadLink:
@@ -857,7 +799,6 @@ class Disk:
         request = Request(self, "GET", "/v1/disk/resources/upload", params)
         return ResourceUploadLink(request)
 
-    # @on_call_event
     def upload_by_url(
             self,
             path: str | ResourceShort,
@@ -887,12 +828,11 @@ class Disk:
         request = Request(self, "POST", "/v1/disk/resources/upload", params)
         return Link(request)
 
-    # @on_call_event
     def info_public_resource(
             self,
             public_key: str,
             *,
-            fields: FieldsList = None,
+            fields: str = None,
             limit: int = None,
             offset: int = None,
             path: str = None,
@@ -923,7 +863,6 @@ class Disk:
         request = Request(self, "GET", "/v1/disk/public/resources", params)
         return PublicResource(request)
 
-    # @on_call_event
     def savetodisk_public_resource(
             self,
             public_key: str,
@@ -957,11 +896,10 @@ class Disk:
         )
         return Link(request)
 
-    # @on_call_event
     def trash_restore(
             self,
             path: str | ResourceShort,
-            fields: FieldsList = None,
+            fields: str = None,
             name: str = None,
             overwrite: bool = None,
             force_async: bool = None,
@@ -987,11 +925,10 @@ class Disk:
         request = Request(self, "PUT", "/v1/disk/trash/resources/restore", params)
         return Link(request)
 
-    # @on_call_event
     def trash(
             self,
             path: str | ResourceShort = "/",
-            fields: FieldsList = None,
+            fields: str = None,
             preview_crop: bool = None,
             preview_size: str = None,
             sort: str = None,
@@ -1019,12 +956,11 @@ class Disk:
         request = Request(self, "GET", "/v1/disk/trash/resources", params)
         return TrashResource(request)
 
-    # @on_call_event
     def trash_clear(
             self,
             *,
             path: str = ResourceShort | None,
-            fields: FieldsList = None,
+            fields: str = None,
             force_async: bool = None,
     ) -> Link:
         """
@@ -1049,12 +985,11 @@ class Disk:
         request = Request(self, "DELETE", "/v1/disk/trash/resources", params)
         return Link(request)
 
-    # @on_call_event
     def status_operation(
             self,
             operation_id: str,
             *,
-            fields: FieldsList = None,
+            fields: str = None,
     ) -> str:
         """
         Получить статус асинхронной операции
@@ -1073,7 +1008,6 @@ class Disk:
         )
         return request.response_body["status"]
 
-    # @on_call_event
     def info(
             self,
             *,
@@ -1099,7 +1033,6 @@ class Disk:
         request = Request(self, "GET", "/v1/disk/", params)
         return DiskInfo(request)
 
-    # #@on_call_event
     def download_file(
             self,
             remote_pathname: str,
@@ -1117,7 +1050,6 @@ class Disk:
                     if callable(progress_fn):
                         progress_fn(loaded_size)
 
-    # #@on_call_event
     def upload(
             self,
             remote_pathname: str,
@@ -1149,7 +1081,7 @@ class Disk:
             remote_pathname: str,
             permanently: bool = False,
             check_md5: str = None,
-            force_async=False,
+            force_async: bool = False,
     ):
         def none_if_false(value):
             return True if value is not None and value else None
