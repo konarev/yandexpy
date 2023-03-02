@@ -110,22 +110,21 @@ class Request:
 
 
 class EmbeddedResources(typing.Generic[T]):
-    def __init__(self, request=None):
-        self.request: "Request" = request
 
     def __set_name__(self, owner_type, field_name):
         self.name = field_name
         self.owner_type = owner_type
-        annotations = utils.full_annotations(owner_type)
+        annotations = utils.full_annotations(self.owner_type)
         self.item_type = annotations[field_name].__args__[0]
 
-    def __set__(self, instance, value: tuple):
-        self.value, self.request = value
+    def __set__(self, instance, value):
+        self.value = value
         self.instance = instance
 
     def __get__(self, owner, owner_type) -> Iterable[T]:
-        for resource in self.request.get_embedded():
-            yield self.item_type(self.request, resource)
+        request = owner._request
+        for resource in request.get_embedded():
+            yield self.item_type(request, resource)
 
 
 def request_map(cls=None, /, *, keys_rename: dict[str, str] = None):
@@ -147,6 +146,7 @@ def request_map(cls=None, /, *, keys_rename: dict[str, str] = None):
         nonlocal keys_rename
         if from_dict is None:
             from_dict = request.response_body
+        self._request = request
         for key_dict, value in from_dict.items():
             attr_name = key_dict
             if key_dict in keys_rename:
@@ -155,14 +155,12 @@ def request_map(cls=None, /, *, keys_rename: dict[str, str] = None):
             if attr_name in annotations:
                 ann_type = utils.get_origin_type(annotations[attr_name])
                 try:
-                    if "EmbeddedResources" in repr(ann_type):
-                        desc_value = ann_type(request)
+                    if utils.is_datadescriptor(ann_type):
+                        #desc_value = ann_type(request)
+                        desc_value = ann_type()
                         desc_value.__set_name__(type(self), attr_name)
-                        # TODO: Дескриптор заработал только через класс, возможные проблемы?
                         setattr(self.__class__, attr_name, desc_value)
-                        value = (value, request)
                     elif hasattr(ann_type, "__request_map__"):
-                        # value = ann_type(value, request)
                         value = ann_type(request, value)
                     elif not isinstance(value, ann_type):
                         if (ann_type == datetime) and isinstance(value, str):
@@ -179,7 +177,7 @@ def request_map(cls=None, /, *, keys_rename: dict[str, str] = None):
                 + f", ".join(
             (
                 f"{key}:{repr(getattr(self, key))}"
-                for key in dir(self) if not key.startswith("__") and key != "items"
+                for key in dir(self) if not key.startswith("_") and key != "items"
             )
         )
                 + ")"
@@ -415,12 +413,6 @@ class ErrorInfo:
     "Причина срабатывания лимита."
     limit: int
     "Значение лимита."
-
-
-# class HttpStatus(enum.Enum):
-#     done = enum.auto()
-#     inProgress = enum.auto()
-#     error = enum.auto()
 
 
 @request_map
